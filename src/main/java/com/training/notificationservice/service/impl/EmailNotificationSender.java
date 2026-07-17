@@ -7,26 +7,28 @@ import com.training.notificationservice.service.NotificationSender;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.mail.MailException;
+import org.springframework.mail.SimpleMailMessage;
+import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.stereotype.Component;
 
-import java.util.concurrent.ThreadLocalRandom;
-
 /**
- * Mock email provider adapter - no real SES/SendGrid call is made (out of
- * scope for this phase). Simulates provider outcomes via a configurable
- * failure rate so {@code NotificationServiceImpl}'s PENDING/SENT/FAILED
- * transition and retry count can be exercised end to end without a real
- * provider account.
+ * Real SMTP email adapter - delegates to {@link JavaMailSender}, configured
+ * via spring.mail.* properties (host/port in application.properties,
+ * username/password in the git-ignored application-secrets.properties).
  */
 @Component
 public class EmailNotificationSender implements NotificationSender {
 
     private static final Logger log = LoggerFactory.getLogger(EmailNotificationSender.class);
 
-    private final double failureRate;
+    private final JavaMailSender mailSender;
+    private final String fromAddress;
 
-    public EmailNotificationSender(@Value("${notification.email.mock.failure-rate:0.1}") double failureRate) {
-        this.failureRate = failureRate;
+    public EmailNotificationSender(JavaMailSender mailSender,
+                                    @Value("${spring.mail.username}") String fromAddress) {
+        this.mailSender = mailSender;
+        this.fromAddress = fromAddress;
     }
 
     @Override
@@ -37,15 +39,18 @@ public class EmailNotificationSender implements NotificationSender {
     @Override
     public void send(Notification notification) {
         String maskedRecipient = mask(notification.getRecipient());
-        double roll = ThreadLocalRandom.current().nextDouble();
-
-        if (roll < failureRate) {
-            log.warn("Simulated email send failure for recipient={}", maskedRecipient);
-            throw new NotificationServiceException(
-                    "Simulated email provider failure for recipient " + maskedRecipient);
+        try {
+            SimpleMailMessage message = new SimpleMailMessage();
+            message.setFrom(fromAddress);
+            message.setTo(notification.getRecipient());
+            message.setSubject(notification.getSubject());
+            message.setText(notification.getMessage());
+            mailSender.send(message);
+            log.info("Email sent to recipient={}", maskedRecipient);
+        } catch (MailException ex) {
+            log.error("Email send failed for recipient={}: {}", maskedRecipient, ex.getMessage(), ex);
+            throw new NotificationServiceException("Email provider failure for recipient " + maskedRecipient, ex);
         }
-
-        log.info("Simulated email sent to recipient={}", maskedRecipient);
     }
 
     private String mask(String email) {
